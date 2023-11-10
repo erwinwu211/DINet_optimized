@@ -29,7 +29,6 @@ logging.basicConfig(
 feature_extractor = Wav2VecFeatureExtractor()
 audio_mapping = Wav2vecDS()
 
-
 # Frames extraction took 29.91 sec
 def extract_frames_from_video(video_path, save_dir):
     videoCapture = cv2.VideoCapture(video_path)
@@ -53,8 +52,12 @@ def extract_frames_from_video(video_path, save_dir):
 
     return frame_width, frame_height
 
+def check_frame_path(video_dir):
+    temp = cv2.imread(video_dir+"/000001.png")
+    return temp.shape[1], temp.shape[0]    
 
-if __name__ == "__main__":
+
+def main():
     start_process = default_timer()
     # load config
     opt = DINetInferenceOptions().parse_args()
@@ -71,7 +74,7 @@ if __name__ == "__main__":
     video_frame_dir = opt.source_video_path.replace(".mp4", "")
     if not os.path.exists(video_frame_dir):
         os.mkdir(video_frame_dir)
-    video_size = extract_frames_from_video(opt.source_video_path, video_frame_dir)
+    video_size = check_frame_path(video_frame_dir)
     end_time = time.time()
     logging.info(f"Frames extraction took {end_time - start_time:.2f} sec.")
 
@@ -80,7 +83,7 @@ if __name__ == "__main__":
     start_time = time.time()
     ds_feature = feature_extractor.compute_audio_feature(
         opt.driving_audio_path
-    )  # Audio features extraction took 1.42 sec.
+    )  
 
     logging.info("Mapping Audio features")
     start_time_mapping = time.time()
@@ -201,24 +204,24 @@ if __name__ == "__main__":
     model.eval()
 
     ############################################## inference frame by frame ##############################################
-    logging.info("generating result video")
-    if not os.path.exists(opt.res_video_dir):
-        os.mkdir(opt.res_video_dir)
-    res_video_path = os.path.join(
-        opt.res_video_dir,
-        os.path.basename(opt.source_video_path)[:-4] + "_facial_dubbing.mp4",
-    )
-    if os.path.exists(res_video_path):
-        os.remove(res_video_path)
-    res_face_path = res_video_path.replace("_facial_dubbing.mp4", "_synthetic_face.mp4")
-    if os.path.exists(res_face_path):
-        os.remove(res_face_path)
-    videowriter = cv2.VideoWriter(
-        res_video_path, cv2.VideoWriter_fourcc(*"XVID"), 25, video_size
-    )
-    videowriter_face = cv2.VideoWriter(
-        res_face_path, cv2.VideoWriter_fourcc(*"XVID"), 25, (resize_w, resize_h)
-    )
+    logging.info("rendering result video")
+    # if not os.path.exists(opt.res_video_dir):
+    #     os.mkdir(opt.res_video_dir)
+    # res_video_path = os.path.join(
+    #     opt.res_video_dir,
+    #     os.path.basename(opt.source_video_path)[:-4] + "_facial_dubbing.mp4",
+    # )
+    # if os.path.exists(res_video_path):
+    #     os.remove(res_video_path)
+    # res_face_path = res_video_path.replace("_facial_dubbing.mp4", "_synthetic_face.mp4")
+    # if os.path.exists(res_face_path):
+    #     os.remove(res_face_path)
+    # videowriter = cv2.VideoWriter(
+    #     res_video_path, cv2.VideoWriter_fourcc(*"XVID"), 25, video_size
+    # )
+    # videowriter_face = cv2.VideoWriter(
+    #     res_face_path, cv2.VideoWriter_fourcc(*"XVID"), 25, (resize_w, resize_h)
+    # )
     for clip_end_index in range(5, pad_length, 1):
         logging.info("synthesizing frame %d/%d", clip_end_index - 5, pad_length - 5)
         crop_flag, crop_radius = compute_crop_radius(
@@ -247,7 +250,7 @@ if __name__ == "__main__":
             + crop_radius_1_4,
             :,
         ]
-        crop_frame_h, crop_frame_w = crop_frame_data.shape[0], crop_frame_data.shape[1]
+        #crop_frame_h, crop_frame_w = crop_frame_data.shape[0], crop_frame_data.shape[1]
         crop_frame_data = cv2.resize(
             crop_frame_data, (resize_w, resize_h)
         )  # [32:224, 32:224, :]
@@ -279,28 +282,33 @@ if __name__ == "__main__":
             pre_frame = (
                 pre_frame.squeeze(0).permute(1, 2, 0).detach().cpu().numpy() * 255
             )
-        videowriter_face.write(pre_frame[:, :, ::-1].copy().astype(np.uint8))
-        pre_frame_resize = cv2.resize(pre_frame, (crop_frame_w, crop_frame_h))
-        frame_data[
-            frame_landmark[29, 1]
-            - crop_radius : frame_landmark[29, 1]
-            + crop_radius * 2,
-            frame_landmark[33, 0]
-            - crop_radius
-            - crop_radius_1_4 : frame_landmark[33, 0]
-            + crop_radius
-            + crop_radius_1_4,
-            :,
-        ] = pre_frame_resize[: crop_radius * 3, :, :]
-        videowriter.write(frame_data[:, :, ::-1])
-    videowriter.release()
-    videowriter_face.release()
-    video_add_audio_path = res_video_path.replace(".mp4", "_add_audio.mp4")
-    if os.path.exists(video_add_audio_path):
-        os.remove(video_add_audio_path)
-    cmd = "ffmpeg -i {} -i {} -c:v copy -c:a aac -strict experimental -map 0:v:0 -map 1:a:0 {}".format(
-        res_video_path, opt.driving_audio_path, video_add_audio_path
-    )
-    subprocess.call(cmd, shell=True)
+        # videowriter_face.write(pre_frame[:, :, ::-1].copy().astype(np.uint8))
+        #cv2.imshow("a",pre_frame[:, :, ::-1].copy().astype(np.uint8))
+        #cv2.waitKey(1)
+    #     pre_frame_resize = cv2.resize(pre_frame, (crop_frame_w, crop_frame_h))
+    #     frame_data[
+    #         frame_landmark[29, 1]
+    #         - crop_radius : frame_landmark[29, 1]
+    #         + crop_radius * 2,
+    #         frame_landmark[33, 0]
+    #         - crop_radius
+    #         - crop_radius_1_4 : frame_landmark[33, 0]
+    #         + crop_radius
+    #         + crop_radius_1_4,
+    #         :,
+    #     ] = pre_frame_resize[: crop_radius * 3, :, :]
+    #     videowriter.write(frame_data[:, :, ::-1])
+    # videowriter.release()
+    # videowriter_face.release()
+    # video_add_audio_path = res_video_path.replace(".mp4", "_add_audio.mp4")
+    # if os.path.exists(video_add_audio_path):
+    #     os.remove(video_add_audio_path)
+    # cmd = "ffmpeg -i {} -i {} -c:v copy -c:a aac -strict experimental -map 0:v:0 -map 1:a:0 {}".format(
+    #     res_video_path, opt.driving_audio_path, video_add_audio_path
+    # )
+    # subprocess.call(cmd, shell=True)
     end_process = default_timer()
     logging.info(f"Video generation took {end_process - start_process:.2f} sec.")
+
+if __name__ == "__main__":
+    main()
