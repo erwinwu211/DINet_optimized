@@ -13,13 +13,21 @@ from timeit import default_timer
 import cv2
 import numpy as np
 import torch
-
+import sys
 from config.config import DINetInferenceOptions
 from models.DINet import DINet
 from utils.data_processing import compute_crop_radius, load_landmark_openface
 from utils.wav2vec import Wav2VecFeatureExtractor
 from utils.wav2vecDS import Wav2vecDS
+from pathlib import Path
 
+import pygame as pg
+from pygame._sdl2 import (
+    get_audio_device_names,
+    AudioDevice,
+    AUDIO_S16,
+    AUDIO_ALLOW_FORMAT_CHANGE,
+)
 # Set up logging configuration
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -28,6 +36,59 @@ logging.basicConfig(
 # Create an instances of the Wav2VecFeatureExtractor and Wav2vecDS classes
 feature_extractor = Wav2VecFeatureExtractor()
 audio_mapping = Wav2vecDS()
+
+from pathlib import Path
+from openai import OpenAI
+
+
+
+class State:
+    def __init__(self):
+        self.recording = False
+        self.sound_chunks = []
+        self.audio = None
+
+
+def setup_audio(state: State):
+    pg.mixer.pre_init(44100, -16, 1, 2048)
+    pg.init()
+
+    names = get_audio_device_names(True)
+    # Add a flag to control recording
+
+    """This is called in the sound thread."""
+
+    def callback(audiodevice, audiomemoryview):
+        if state.recording:
+            state.sound_chunks.append(bytes(audiomemoryview))
+
+    # set_post_mix(callback)
+
+    state.audio = AudioDevice(
+        devicename=names[0],
+        iscapture=True,
+        frequency=44100 * 2,
+        audioformat=AUDIO_S16,
+        numchannels=1,
+        chunksize=2048,
+        allowed_changes=AUDIO_ALLOW_FORMAT_CHANGE,
+        callback=callback,
+    )
+    state.audio.pause(0)
+
+
+def is_speech_start(sound_chunks, threshold=1):
+    return sound_chunks[-1] >= threshold
+
+
+def setup_display():
+    pg.init()
+    WIDTH = 500
+    HEIGHT = 500
+
+    windowSurface = pg.display.set_mode((WIDTH, HEIGHT), 32)
+    return windowSurface
+
 
 # Frames extraction took 29.91 sec
 def extract_frames_from_video(video_path, save_dir):
@@ -56,33 +117,42 @@ def check_frame_path(video_dir):
     temp = cv2.imread(video_dir+"/000001.png")
     return temp.shape[1], temp.shape[0]    
 
+def convert_opencv_img_to_pygame(opencv_image):
+    """
+    OpenCVの画像をPygame用に変換.
 
-def main():
-    start_process = default_timer()
+    see https://blanktar.jp/blog/2016/01/pygame-draw-opencv-image.html
+    """
+    opencv_image = opencv_image[:,:,::-1]  # OpenCVはBGR、pygameはRGBなので変換してやる必要がある。
+    shape = opencv_image.shape[1::-1]  # OpenCVは(高さ, 幅, 色数)、pygameは(幅, 高さ)なのでこれも変換。
+    pygame_image = pg.image.frombuffer(opencv_image.tostring(), shape, 'RGB')
+
+    return pygame_image
+def a2m_preprocess(img_dir, video_frame_path_list, audio_path):
     # load config
     opt = DINetInferenceOptions().parse_args()
-    if not os.path.exists(opt.source_video_path):
-        raise ValueError("wrong video path : {}".format(opt.source_video_path))
+    # if not os.path.exists(opt.source_video_path):
+    #     raise ValueError("wrong video path : {}".format(opt.source_video_path))
     if not os.path.exists(opt.source_openface_landmark_path):
         raise ValueError(
             "wrong openface stats path : {}".format(opt.source_openface_landmark_path)
         )
 
     # extract frames from source video
-    logging.info("extracting frames from video: %s", opt.source_video_path)
-    start_time = time.time()
-    video_frame_dir = opt.source_video_path.replace(".mp4", "")
-    if not os.path.exists(video_frame_dir):
-        os.mkdir(video_frame_dir)
-    video_size = check_frame_path(video_frame_dir)
-    end_time = time.time()
-    logging.info(f"Frames extraction took {end_time - start_time:.2f} sec.")
+    # logging.info("extracting frames from video: %s", opt.source_video_path)
+    # start_time = time.time()
+    # video_frame_dir = opt.source_video_path.replace(".mp4", "")
+    # if not os.path.exists(video_frame_dir):
+    #     os.mkdir(video_frame_dir)
+    video_size = check_frame_path(img_dir)
+    #end_time = time.time()
+    #logging.info(f"Frames extraction took {end_time - start_time:.2f} sec.")
 
     # extract audio features using Hubert Model from Pytorch
-    logging.info("extracting audio speech features from : %s", opt.driving_audio_path)
+    logging.info("extracting audio speech features from : %s", audio_path)
     start_time = time.time()
     ds_feature = feature_extractor.compute_audio_feature(
-        opt.driving_audio_path
+        audio_path
     )  
 
     logging.info("Mapping Audio features")
@@ -112,10 +182,9 @@ def main():
 
     # align frame with driving audio
     logging.info("aligning frames with driving audio")
-    video_frame_path_list = glob.glob(os.path.join(video_frame_dir, "*.png"))
+    print(len(video_frame_path_list))
     if len(video_frame_path_list) != video_landmark_data.shape[0]:
         raise ValueError("video frames are misaligned with detected landmarks")
-    video_frame_path_list.sort()
     video_frame_path_list_cycle = video_frame_path_list + video_frame_path_list[::-1]
     video_landmark_data_cycle = np.concatenate(
         [video_landmark_data, np.flip(video_landmark_data, 0)], 0
@@ -202,7 +271,10 @@ def main():
         new_state_dict[name] = v
     model.load_state_dict(new_state_dict)
     model.eval()
+    return model, pad_length, video_size, opt, ds_feature_padding,ref_img_tensor, resize_w,resize_h, res_video_landmark_data_pad, res_video_frame_path_list_pad
 
+
+def a2m(model, idx, video_size, opt, ds_feature_padding,ref_img_tensor, resize_w,resize_h, res_video_landmark_data_pad, res_video_frame_path_list_pad):
     ############################################## inference frame by frame ##############################################
     logging.info("rendering result video")
     # if not os.path.exists(opt.res_video_dir):
@@ -216,87 +288,84 @@ def main():
     # res_face_path = res_video_path.replace("_facial_dubbing.mp4", "_synthetic_face.mp4")
     # if os.path.exists(res_face_path):
     #     os.remove(res_face_path)
-    # videowriter = cv2.VideoWriter(
-    #     res_video_path, cv2.VideoWriter_fourcc(*"XVID"), 25, video_size
-    # )
-    # videowriter_face = cv2.VideoWriter(
-    #     res_face_path, cv2.VideoWriter_fourcc(*"XVID"), 25, (resize_w, resize_h)
-    # )
-    for clip_end_index in range(5, pad_length, 1):
-        logging.info("synthesizing frame %d/%d", clip_end_index - 5, pad_length - 5)
-        crop_flag, crop_radius = compute_crop_radius(
-            video_size,
-            res_video_landmark_data_pad[clip_end_index - 5 : clip_end_index, :, :],
-            random_scale=1.05,
+    clip_end_index = idx +5
+    print(video_size)
+    logging.info("synthesizing frame %d", clip_end_index - 5)
+    crop_flag, crop_radius = compute_crop_radius(
+        video_size,
+        res_video_landmark_data_pad[clip_end_index - 5 : clip_end_index, :, :],
+        random_scale=1.05,
+    )
+    if not crop_flag:
+        raise (
+            "our method can not handle videos with large change of facial size!!"
         )
-        if not crop_flag:
-            raise (
-                "our method can not handle videos with large change of facial size!!"
-            )
-        crop_radius_1_4 = crop_radius // 4
-        frame_data = cv2.imread(res_video_frame_path_list_pad[clip_end_index - 3])[
-            :, :, ::-1
-        ]
-        frame_landmark = res_video_landmark_data_pad[clip_end_index - 3, :, :]
-        crop_frame_data = frame_data[
-            frame_landmark[29, 1]
-            - crop_radius : frame_landmark[29, 1]
-            + crop_radius * 2
-            + crop_radius_1_4,
-            frame_landmark[33, 0]
-            - crop_radius
-            - crop_radius_1_4 : frame_landmark[33, 0]
-            + crop_radius
-            + crop_radius_1_4,
-            :,
-        ]
-        #crop_frame_h, crop_frame_w = crop_frame_data.shape[0], crop_frame_data.shape[1]
-        crop_frame_data = cv2.resize(
-            crop_frame_data, (resize_w, resize_h)
-        )  # [32:224, 32:224, :]
-        crop_frame_data = crop_frame_data / 255.0
-        crop_frame_data[
-            opt.mouth_region_size // 2 : opt.mouth_region_size // 2
-            + opt.mouth_region_size,
-            opt.mouth_region_size // 8 : opt.mouth_region_size // 8
-            + opt.mouth_region_size,
-            :,
-        ] = 0
+    crop_radius_1_4 = crop_radius // 4
+    frame_data = cv2.imread(res_video_frame_path_list_pad[clip_end_index - 3])[
+        :, :, ::-1
+    ]
+    frame_landmark = res_video_landmark_data_pad[clip_end_index - 3, :, :]
+    crop_frame_data = frame_data[
+        frame_landmark[29, 1]
+        - crop_radius : frame_landmark[29, 1]
+        + crop_radius * 2
+        + crop_radius_1_4,
+        frame_landmark[33, 0]
+        - crop_radius
+        - crop_radius_1_4 : frame_landmark[33, 0]
+        + crop_radius
+        + crop_radius_1_4,
+        :,
+    ]
+    crop_frame_h, crop_frame_w = crop_frame_data.shape[0], crop_frame_data.shape[1]
+    crop_frame_data = cv2.resize(
+        crop_frame_data, (resize_w, resize_h)
+    )  # [32:224, 32:224, :]
+    crop_frame_data = crop_frame_data / 255.0
+    crop_frame_data[
+        opt.mouth_region_size // 2 : opt.mouth_region_size // 2
+        + opt.mouth_region_size,
+        opt.mouth_region_size // 8 : opt.mouth_region_size // 8
+        + opt.mouth_region_size,
+        :,
+    ] = 0
 
-        crop_frame_tensor = (
-            torch.from_numpy(crop_frame_data)
-            .float()
-            .cuda()
-            .permute(2, 0, 1)
-            .unsqueeze(0)
+    crop_frame_tensor = (
+        torch.from_numpy(crop_frame_data)
+        .float()
+        .cuda()
+        .permute(2, 0, 1)
+        .unsqueeze(0)
+    )
+    deepspeech_tensor = (
+        torch.from_numpy(ds_feature_padding[clip_end_index - 5 : clip_end_index, :])
+        .permute(1, 0)
+        .unsqueeze(0)
+        .float()
+        .cuda()
+    )
+    with torch.no_grad():
+        pre_frame = model(crop_frame_tensor, ref_img_tensor, deepspeech_tensor)
+        pre_frame = (
+            pre_frame.squeeze(0).permute(1, 2, 0).detach().cpu().numpy() * 255
         )
-        deepspeech_tensor = (
-            torch.from_numpy(ds_feature_padding[clip_end_index - 5 : clip_end_index, :])
-            .permute(1, 0)
-            .unsqueeze(0)
-            .float()
-            .cuda()
-        )
-        with torch.no_grad():
-            pre_frame = model(crop_frame_tensor, ref_img_tensor, deepspeech_tensor)
-            pre_frame = (
-                pre_frame.squeeze(0).permute(1, 2, 0).detach().cpu().numpy() * 255
-            )
+    
         # videowriter_face.write(pre_frame[:, :, ::-1].copy().astype(np.uint8))
-        #cv2.imshow("a",pre_frame[:, :, ::-1].copy().astype(np.uint8))
-        #cv2.waitKey(1)
-    #     pre_frame_resize = cv2.resize(pre_frame, (crop_frame_w, crop_frame_h))
-    #     frame_data[
-    #         frame_landmark[29, 1]
-    #         - crop_radius : frame_landmark[29, 1]
-    #         + crop_radius * 2,
-    #         frame_landmark[33, 0]
-    #         - crop_radius
-    #         - crop_radius_1_4 : frame_landmark[33, 0]
-    #         + crop_radius
-    #         + crop_radius_1_4,
-    #         :,
-    #     ] = pre_frame_resize[: crop_radius * 3, :, :]
+        # cv2.imshow("a",pre_frame[:, :, ::-1].copy().astype(np.uint8))
+        # cv2.waitKey(1)
+    pre_frame_resize = cv2.resize(pre_frame, (crop_frame_w, crop_frame_h))
+    frame_data[
+        frame_landmark[29, 1]
+        - crop_radius : frame_landmark[29, 1]
+        + crop_radius * 2,
+        frame_landmark[33, 0]
+        - crop_radius
+        - crop_radius_1_4 : frame_landmark[33, 0]
+        + crop_radius
+        + crop_radius_1_4,
+        :,
+    ] = pre_frame_resize[: crop_radius * 3, :, :]
+    return frame_data[:, :, ::-1]#pre_frame[:, :, ::-1].copy().astype(np.uint8)
     #     videowriter.write(frame_data[:, :, ::-1])
     # videowriter.release()
     # videowriter_face.release()
@@ -307,8 +376,93 @@ def main():
     #     res_video_path, opt.driving_audio_path, video_add_audio_path
     # )
     # subprocess.call(cmd, shell=True)
-    end_process = default_timer()
-    logging.info(f"Video generation took {end_process - start_process:.2f} sec.")
+    #end_process = default_timer()
+    #logging.info(f"Video generation took {end_process - start_process:.2f} sec.")
+
+def device(data_root):
+
+    state = State()
+    windowSurface = setup_display()
+    #setup_audio(state)
+    clock = pg.time.Clock()
+    vid_name = "/out2/"
+    ori_vid_name = "/out/"
+    video_path = data_root+ori_vid_name
+    img_path = data_root+vid_name
+
+
+    client = OpenAI()
+    inp = input("Input the Questions: ")
+    inp = inp + " Please answer under 20 words, and start with 没问题"
+    response = client.chat.completions.create(
+        model="gpt-4",
+        messages=[{"role": "system", "content": "You are a helpful assistant."},
+                  {"role": "user", "content": inp}]
+    )
+    assistant_res = response.choices[0].message.content
+
+    print(assistant_res)
+    speech_file_path = data_root+"/speech.mp3"
+    
+    response = client.audio.speech.create(
+    model="tts-1",
+    voice="nova",
+    input=assistant_res
+    )
+    response.stream_to_file(speech_file_path)
+
+    audio_path = data_root+"/speech.mp3"
+
+    image_list = sorted(glob.glob(img_path+"*.png"))
+    ori_vid_list = sorted(glob.glob(video_path+"*.png"))
+    model, pad_length, video_size, opt, ds_feature_padding,ref_img_tensor, resize_w,resize_h, res_video_landmark_data_pad, res_video_frame_path_list_pad = a2m_preprocess(img_path, image_list, audio_path)
+    
+    f = 0
+    running = True
+    print("generated " + str(pad_length) + " frames")
+    pg.mixer.music.load(audio_path)
+    pg.mixer.music.play()
+    while running:
+        for event in pg.event.get():
+            if event.type == pg.QUIT:
+                pg.quit()
+                sys.exit()
+
+            elif event.type == pg.KEYDOWN:
+                # Quit when the user presses the ESC key
+                if event.key == pg.K_ESCAPE:
+                    running = False
+                # Start recording when SPACE key is pressed
+                elif event.key == pg.K_SPACE:
+                    state.sound_chunks = []
+                    state.recording = True
+
+            elif event.type == pg.KEYUP:
+                # Stop recording when SPACE key is released
+                if event.key == pg.K_SPACE:
+                    state.recording = False
+                    sound_data = pg.mixer.Sound(buffer=b"".join(state.sound_chunks))
+                    sound = pg.mixer.Sound(buffer=sound_data)
+                    sound.play()
+        if f < pad_length - 2:
+            img = a2m(model, f, video_size, opt, ds_feature_padding,ref_img_tensor, resize_w,resize_h, res_video_landmark_data_pad, res_video_frame_path_list_pad)
+        else:
+            img = cv2.imread(ori_vid_list[f-3])[200:700,300:800]
+        #ori_img = cv2.imread(ori_vid_list[f])
+        #ori_img[200:700,300:800] = img
+        #ori_img = cv2.resize(ori_img, dsize=None, fx=0.5, fy=0.5)
+        #ori_vid_list = cv2.resize()
+        img = convert_opencv_img_to_pygame(img)
+
+        windowSurface.blit(img, (0, 0))
+        pg.display.flip()
+        f += 1
+        f = f % len(image_list)
+        clock.tick(25)
+    pg.display.quit()
+    pg.quit()
+    exit()
 
 if __name__ == "__main__":
-    main()
+    device("asserts/examples/")
+    #a2m()
