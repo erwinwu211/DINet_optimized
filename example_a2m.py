@@ -8,7 +8,7 @@ import time
 import pygame as pg
 
 #generate audio file using TTS
-audio_file_path = "./output.mp3"
+audio_file_path = "./speech.mp3"
 # client = OpenAI()
 # response = client.audio.speech.create(model="tts-1",
 #                                       voice="nova",
